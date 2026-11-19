@@ -16,6 +16,8 @@ export default defineConfig({
           }
         },
       },
+      '/games': { target: 'http://localhost:3002' },
+      '/scores': { target: 'http://localhost:3002' },
       '/socket.io': {
         target: 'http://localhost:3002',
         ws: true,

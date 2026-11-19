@@ -1,7 +1,9 @@
 import { Navigate, Route, Routes } from 'react-router-dom';
 import { useAuth } from './auth';
+import { AboutPage } from './pages/AboutPage';
 import { AuthCallbackPage } from './pages/AuthCallbackPage';
 import { GamePage } from './pages/GamePage';
+import { GamesPage } from './pages/GamesPage';
 import { LobbyPage } from './pages/LobbyPage';
 import { LoginPage } from './pages/LoginPage';
 
@@ -9,8 +11,10 @@ function Protected({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();
   if (loading) {
     return (
-      <div className="page center">
-        <p>Loading…</p>
+      <div className="mobile-shell">
+        <div className="app-main center">
+          <p>Loading…</p>
+        </div>
       </div>
     );
   }
@@ -29,6 +33,22 @@ export default function App() {
         element={
           <Protected>
             <LobbyPage />
+          </Protected>
+        }
+      />
+      <Route
+        path="/games"
+        element={
+          <Protected>
+            <GamesPage />
+          </Protected>
+        }
+      />
+      <Route
+        path="/about"
+        element={
+          <Protected>
+            <AboutPage />
           </Protected>
         }
       />

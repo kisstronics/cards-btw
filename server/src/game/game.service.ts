@@ -2,8 +2,11 @@ import {
   BadRequestException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
+  OnModuleInit,
 } from '@nestjs/common';
+import { DatabaseService } from '../db/database.service';
 import {
   Card,
   createDeck,
@@ -15,18 +18,19 @@ import {
   GamePublic,
   InternalGame,
   InternalPlayer,
-  InternalRound,
   PlayerTurnStatus,
 } from './game.types';
 
 const MIN_PLAYERS = 2;
 const MAX_PLAYERS = 6;
-const DEFAULT_BUY_IN = 100;
+/** Everyone starts at 0; balances may go negative. */
+const STARTING_CHIPS = 0;
 /** Each player antes this much onto the board at start and whenever the board hits 0. */
 const ANTE = 10;
 const DEFAULT_BET = 10;
 const MIN_BET = 5;
-const MAX_BET = 50;
+/** Seconds a player has to bet or skip before auto-skip. */
+const TURN_SECONDS = 30;
 
 function generateCode(): string {
   const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -38,29 +42,47 @@ function generateCode(): string {
 }
 
 @Injectable()
-export class GameService {
+export class GameService implements OnModuleInit {
+  private readonly logger = new Logger(GameService.name);
   private games = new Map<string, InternalGame>();
   private playerToGame = new Map<string, string>();
 
-  createGame(
-    owner: { id: string; name: string; picture?: string },
-    buyIn = DEFAULT_BUY_IN,
-  ) {
-    this.leaveAnyGame(owner.id);
+  constructor(private readonly db: DatabaseService) {}
+
+  async onModuleInit() {
+    try {
+      const loaded = await this.db.loadActiveGames();
+      for (const game of loaded) {
+        this.games.set(game.code, game);
+        for (const player of game.players) {
+          this.playerToGame.set(player.id, game.code);
+        }
+      }
+      if (loaded.length) {
+        this.logger.log(`Restored ${loaded.length} active game(s) from DB`);
+      }
+    } catch (err) {
+      this.logger.warn(
+        `Could not restore games: ${(err as Error).message}`,
+      );
+    }
+  }
+
+  async createGame(owner: { id: string; name: string; picture?: string }) {
+    await this.leaveAnyGame(owner.id);
 
     let code = generateCode();
     while (this.games.has(code)) {
       code = generateCode();
     }
 
-    const chips = Math.max(20, Math.min(buyIn, 1000));
     const game: InternalGame = {
       code,
       status: 'lobby',
       ownerId: owner.id,
       minPlayers: MIN_PLAYERS,
       maxPlayers: MAX_PLAYERS,
-      buyIn: chips,
+      buyIn: STARTING_CHIPS,
       pot: 0,
       deck: [],
       players: [
@@ -68,60 +90,92 @@ export class GameService {
           id: owner.id,
           name: owner.name,
           picture: owner.picture,
-          chips,
+          chips: STARTING_CHIPS,
           seat: 0,
           connected: true,
           socketIds: new Set(),
           hand: null,
           actedThisOrbit: false,
+          roundsPlayed: 0,
         },
       ],
       round: null,
       createdAt: Date.now(),
+      startedAt: null,
+      endedAt: null,
     };
 
     this.games.set(code, game);
     this.playerToGame.set(owner.id, code);
+    await this.persist(game);
     return this.toPublic(game, owner.id);
   }
 
-  joinGame(
+  async joinGame(
     code: string,
     player: { id: string; name: string; picture?: string },
   ) {
     const game = this.requireGame(code.toUpperCase());
+    if (game.status === 'ended') {
+      throw new BadRequestException('This game has ended');
+    }
+
+    const existing = game.players.find((p) => p.id === player.id);
+    if (existing) {
+      // Already on the roster — allow rejoin while lobby or playing.
+      if (game.status !== 'lobby' && game.status !== 'playing') {
+        throw new BadRequestException('Cannot join this game');
+      }
+      existing.connected = true;
+      existing.name = player.name || existing.name;
+      existing.picture = player.picture || existing.picture;
+      this.playerToGame.set(player.id, game.code);
+      await this.persist(game);
+      return this.toPublic(game, player.id);
+    }
+
+    // New players may only join before the host starts.
     if (game.status !== 'lobby') {
-      throw new BadRequestException('Game already started');
+      throw new BadRequestException(
+        'Game already started — only existing players can rejoin',
+      );
     }
     if (game.players.length >= game.maxPlayers) {
       throw new BadRequestException('Game is full');
     }
 
-    const existing = game.players.find((p) => p.id === player.id);
-    if (existing) {
-      existing.connected = true;
-      this.playerToGame.set(player.id, game.code);
-      return this.toPublic(game, player.id);
-    }
+    await this.leaveAnyGame(player.id);
 
-    this.leaveAnyGame(player.id);
-
-    game.players.push({
+    const newPlayer: InternalPlayer = {
       id: player.id,
       name: player.name,
       picture: player.picture,
-      chips: game.buyIn,
+      chips: STARTING_CHIPS,
       seat: game.players.length,
       connected: true,
       socketIds: new Set(),
       hand: null,
       actedThisOrbit: false,
-    });
+      roundsPlayed: 0,
+    };
+
+    game.players.push(newPlayer);
     this.playerToGame.set(player.id, game.code);
+    await this.persist(game);
+    await this.db
+      .recordAction({
+        gameCode: game.code,
+        userId: player.id,
+        action: 'join',
+        potAfter: game.pot,
+        chipsAfter: newPlayer.chips,
+        message: `${player.name} joined`,
+      })
+      .catch(() => undefined);
     return this.toPublic(game, player.id);
   }
 
-  leaveGame(playerId: string) {
+  async leaveGame(playerId: string) {
     const code = this.playerToGame.get(playerId);
     if (!code) return null;
     const game = this.games.get(code);
@@ -135,6 +189,9 @@ export class GameService {
       this.playerToGame.delete(playerId);
       if (game.players.length === 0) {
         this.games.delete(code);
+        await this.db.deleteGame(code).catch((err) => {
+          this.logger.warn(`deleteGame failed: ${(err as Error).message}`);
+        });
         return null;
       }
       if (game.ownerId === playerId) {
@@ -143,6 +200,7 @@ export class GameService {
       game.players.forEach((p, i) => {
         p.seat = i;
       });
+      await this.persist(game);
       return this.toPublic(game);
     }
 
@@ -151,20 +209,24 @@ export class GameService {
       player.connected = false;
       player.socketIds.clear();
     }
+    // Always detach from the room so Leave / sync won't bounce them back in.
+    this.playerToGame.delete(playerId);
+    await this.persist(game);
     return this.toPublic(game);
   }
 
-  attachSocket(playerId: string, socketId: string) {
+  async attachSocket(playerId: string, socketId: string) {
     const game = this.getGameForPlayer(playerId);
     if (!game) return null;
     const player = game.players.find((p) => p.id === playerId);
     if (!player) return null;
     player.socketIds.add(socketId);
     player.connected = true;
+    await this.persist(game);
     return this.toPublic(game, playerId);
   }
 
-  detachSocket(playerId: string, socketId: string) {
+  async detachSocket(playerId: string, socketId: string) {
     const game = this.getGameForPlayer(playerId);
     if (!game) return null;
     const player = game.players.find((p) => p.id === playerId);
@@ -173,10 +235,11 @@ export class GameService {
     if (player.socketIds.size === 0) {
       player.connected = false;
     }
+    await this.persist(game);
     return this.toPublic(game);
   }
 
-  startGame(code: string, requesterId: string) {
+  async startGame(code: string, requesterId: string) {
     const game = this.requireGame(code);
     if (game.ownerId !== requesterId) {
       throw new ForbiddenException('Only the owner can start the game');
@@ -193,33 +256,49 @@ export class GameService {
     game.players = shuffle(game.players).map((p, i) => ({
       ...p,
       seat: i,
-      chips: game.buyIn,
+      chips: STARTING_CHIPS,
       hand: null,
       actedThisOrbit: false,
+      roundsPlayed: 0,
     }));
     game.pot = 0;
     game.deck = shuffle(createDeck());
     game.status = 'playing';
-    this.collectAnte(game);
-    this.beginOrbit(game, 0);
+    game.startedAt = Date.now();
+    game.endedAt = null;
+    await this.beginOrbit(game, 0);
+    await this.persist(game);
     return this.toPublic(game, requesterId);
   }
 
-  endGame(code: string, requesterId: string) {
+  async endGame(code: string, requesterId: string) {
     const game = this.requireGame(code);
     if (game.ownerId !== requesterId) {
       throw new ForbiddenException('Only the owner can end the game');
     }
     game.status = 'ended';
+    game.endedAt = Date.now();
     game.round = null;
     game.players.forEach((p) => {
       p.hand = null;
       p.actedThisOrbit = false;
     });
+    await this.persist(game);
+    await this.db.saveScores(game).catch((err) => {
+      this.logger.warn(`saveScores failed: ${(err as Error).message}`);
+    });
+    await this.db
+      .recordAction({
+        gameCode: game.code,
+        userId: requesterId,
+        action: 'end',
+        message: 'Game ended',
+      })
+      .catch(() => undefined);
     return this.toPublic(game, requesterId);
   }
 
-  placeBet(code: string, playerId: string, amount: number) {
+  async placeBet(code: string, playerId: string, amount: number) {
     const game = this.requireGame(code);
     this.assertPlaying(game);
     const round = game.round!;
@@ -242,7 +321,8 @@ export class GameService {
     }
 
     const bet = Math.floor(amount);
-    const maxBet = Math.min(MAX_BET, game.pot, bettor.chips);
+    // Max bet is the board amount; chips may go negative.
+    const maxBet = game.pot;
     const minBet = Math.min(MIN_BET, maxBet);
     if (bet < minBet || bet > maxBet) {
       throw new BadRequestException(
@@ -251,12 +331,12 @@ export class GameService {
     }
 
     round.phase = 'revealing';
+    round.turnDeadlineAt = null;
     const third = this.draw(game);
     round.thirdCard = third;
 
     const won = isBetween(third, bettor.hand[0], bettor.hand[1]);
     if (won) {
-      // Win: take the bet from the board
       game.pot -= bet;
       bettor.chips += bet;
       round.lastResult = {
@@ -270,7 +350,6 @@ export class GameService {
             : `${bettor.name} won ${bet} from the board (${game.pot} left)`,
       };
     } else {
-      // Lose: chips go onto the board
       bettor.chips -= bet;
       game.pot += bet;
       round.lastResult = {
@@ -283,28 +362,41 @@ export class GameService {
     }
 
     bettor.actedThisOrbit = true;
+    bettor.roundsPlayed = (bettor.roundsPlayed || 0) + 1;
     round.phase = 'resolved';
 
     const clearedBoard = won && game.pot === 0;
     const clearerSeat = bettor.seat;
 
+    await this.persist(game);
+    await this.db
+      .recordAction({
+        gameCode: game.code,
+        userId: bettor.id,
+        action: won ? 'bet_win' : 'bet_lose',
+        amount: bet,
+        potAfter: game.pot,
+        chipsAfter: bettor.chips,
+        message: round.lastResult?.message,
+      })
+      .catch(() => undefined);
+
     return {
       public: this.toPublic(game, playerId),
       delayMs: 1800,
-      next: () => {
+      next: async () => {
         if (clearedBoard) {
-          // Clearer serves the next deal; next seat picks first.
-          this.collectAnte(game);
-          this.beginOrbit(game, clearerSeat);
+          await this.beginOrbit(game, clearerSeat);
         } else {
-          this.advanceToNextBettor(game);
+          await this.advanceToNextBettor(game);
         }
+        await this.persist(game);
         return this.toPublic(game);
       },
     };
   }
 
-  skipBet(code: string, playerId: string) {
+  async skipBet(code: string, playerId: string) {
     const game = this.requireGame(code);
     this.assertPlaying(game);
     const round = game.round!;
@@ -317,17 +409,32 @@ export class GameService {
       throw new ForbiddenException('Not your turn');
     }
 
-    bettor.actedThisOrbit = true;
-    round.lastResult = {
-      bettorId: bettor.id,
-      bettorName: bettor.name,
-      amount: 0,
-      won: false,
-      message: `${bettor.name} skipped`,
-    };
+    return this.resolveSkip(game, bettor, false, playerId);
+  }
 
-    this.advanceToNextBettor(game);
-    return this.toPublic(game, playerId);
+  /** Server-driven skip when the 30s turn timer expires. */
+  async autoSkipTurn(code: string) {
+    const game = this.requireGame(code);
+    this.assertPlaying(game);
+    const round = game.round!;
+    if (round.phase !== 'awaiting_bet') {
+      return this.toPublic(game);
+    }
+    if (round.turnDeadlineAt && Date.now() < round.turnDeadlineAt - 250) {
+      // Timer fired early — ignore
+      return this.toPublic(game);
+    }
+
+    const bettor = this.playerAtSeat(game, round.bettorSeat);
+    return this.resolveSkip(game, bettor, true);
+  }
+
+  /** Remaining ms until auto-skip, or null if no open turn. */
+  turnMsRemaining(code: string): number | null {
+    const game = this.games.get(code.toUpperCase());
+    if (!game?.round || game.round.phase !== 'awaiting_bet') return null;
+    if (!game.round.turnDeadlineAt) return null;
+    return Math.max(0, game.round.turnDeadlineAt - Date.now());
   }
 
   getPublicForPlayer(playerId: string): GamePublic | null {
@@ -341,12 +448,59 @@ export class GameService {
   }
 
   betLimits() {
-    return { min: MIN_BET, max: MAX_BET, default: DEFAULT_BET, ante: ANTE };
+    return { min: MIN_BET, max: 'board', default: DEFAULT_BET, ante: ANTE };
   }
 
-  private leaveAnyGame(playerId: string) {
+  async listGames(viewerId?: string) {
+    if (!viewerId) {
+      return { games: [] };
+    }
+
+    // Only games this user created or joined — never a public directory.
+    const live = [...this.games.values()]
+      .filter((g) => g.status === 'lobby' || g.status === 'playing')
+      .filter(
+        (g) =>
+          g.ownerId === viewerId || g.players.some((p) => p.id === viewerId),
+      )
+      .map((g) => {
+        const owner = g.players.find((p) => p.id === g.ownerId);
+        const players = [...g.players]
+          .sort((a, b) => b.chips - a.chips)
+          .map((p) => ({
+            id: p.id,
+            name: p.name,
+            score: p.chips,
+            roundsPlayed: p.roundsPlayed || 0,
+          }));
+        const canRejoin = g.status === 'playing';
+        return {
+          code: g.code,
+          status: g.status,
+          playerCount: g.players.length,
+          maxPlayers: g.maxPlayers,
+          pot: g.pot,
+          ownerName: owner?.name || 'Host',
+          createdAt: g.createdAt,
+          startedAt: g.startedAt,
+          endedAt: g.endedAt,
+          joinable: true,
+          canRejoin,
+          players,
+        };
+      })
+      .sort((a, b) => b.createdAt - a.createdAt);
+
+    const recent = await this.db.listRecentGamesForUser(viewerId, 30);
+    const liveCodes = new Set(live.map((g) => g.code));
+    const rest = recent.filter((g) => !liveCodes.has(g.code));
+
+    return { games: [...live, ...rest] };
+  }
+
+  private async leaveAnyGame(playerId: string) {
     if (this.playerToGame.get(playerId)) {
-      this.leaveGame(playerId);
+      await this.leaveGame(playerId);
     }
   }
 
@@ -394,19 +548,65 @@ export class GameService {
     }
   }
 
-  /** Each player puts ANTE onto the board. */
-  private collectAnte(game: InternalGame) {
+  /** Each player puts ANTE onto the board (chips may go negative). */
+  private async collectAnte(game: InternalGame) {
     for (const player of game.players) {
-      const put = Math.min(ANTE, player.chips);
-      player.chips -= put;
-      game.pot += put;
+      player.chips -= ANTE;
+      game.pot += ANTE;
+      await this.db
+        .recordAction({
+          gameCode: game.code,
+          userId: player.id,
+          action: 'ante',
+          amount: ANTE,
+          potAfter: game.pot,
+          chipsAfter: player.chips,
+          message: `${player.name} anted ${ANTE}`,
+        })
+        .catch(() => undefined);
     }
   }
 
+  private async resolveSkip(
+    game: InternalGame,
+    bettor: InternalPlayer,
+    timedOut: boolean,
+    viewerId?: string,
+  ) {
+    const round = game.round!;
+    bettor.actedThisOrbit = true;
+    bettor.roundsPlayed = (bettor.roundsPlayed || 0) + 1;
+    round.turnDeadlineAt = null;
+    round.lastResult = {
+      bettorId: bettor.id,
+      bettorName: bettor.name,
+      amount: 0,
+      won: false,
+      message: timedOut
+        ? `${bettor.name} ran out of time — skipped`
+        : `${bettor.name} skipped`,
+    };
+
+    await this.advanceToNextBettor(game);
+    await this.persist(game);
+    await this.db
+      .recordAction({
+        gameCode: game.code,
+        userId: bettor.id,
+        action: timedOut ? 'timeout_skip' : 'skip',
+        amount: 0,
+        potAfter: game.pot,
+        chipsAfter: bettor.chips,
+        message: round.lastResult.message,
+      })
+      .catch(() => undefined);
+    return this.toPublic(game, viewerId);
+  }
+
   /** Drop all hands and deal 2 private cards; dealer serves, next seat picks. */
-  private beginOrbit(game: InternalGame, dealerSeat: number) {
+  private async beginOrbit(game: InternalGame, dealerSeat: number) {
     if (game.pot <= 0) {
-      this.collectAnte(game);
+      await this.collectAnte(game);
     }
 
     this.ensureDeck(game, game.players.length * 2 + 3);
@@ -421,6 +621,7 @@ export class GameService {
       bettorSeat,
       thirdCard: null,
       phase: 'awaiting_bet',
+      turnDeadlineAt: Date.now() + TURN_SECONDS * 1000,
     };
   }
 
@@ -428,13 +629,14 @@ export class GameService {
     game.round!.bettorSeat = bettorSeat;
     game.round!.thirdCard = null;
     game.round!.phase = 'awaiting_bet';
+    game.round!.turnDeadlineAt = Date.now() + TURN_SECONDS * 1000;
   }
 
   /**
    * After a skip or failed bet, give the next player a turn.
    * When everyone has acted (all skip/fail, or finished the deal), serve new cards.
    */
-  private advanceToNextBettor(game: InternalGame) {
+  private async advanceToNextBettor(game: InternalGame) {
     if (!game.round) return;
 
     const n = game.players.length;
@@ -449,9 +651,16 @@ export class GameService {
       }
     }
 
-    // Everyone skipped or failed this deal → new cards; next dealer serves
     const nextDealer = (game.round.dealerSeat + 1) % n;
-    this.beginOrbit(game, nextDealer);
+    await this.beginOrbit(game, nextDealer);
+  }
+
+  private async persist(game: InternalGame) {
+    try {
+      await this.db.saveGame(game);
+    } catch (err) {
+      this.logger.warn(`persist failed: ${(err as Error).message}`);
+    }
   }
 
   private turnStatusFor(
@@ -459,8 +668,14 @@ export class GameService {
     player: InternalPlayer,
   ): PlayerTurnStatus {
     if (game.status !== 'playing' || !game.round) return 'idle';
-    if (player.seat === game.round.bettorSeat) return 'betting';
+    if (
+      player.seat === game.round.bettorSeat &&
+      game.round.phase === 'awaiting_bet'
+    ) {
+      return 'betting';
+    }
     if (player.actedThisOrbit) return 'done';
+    if (game.round.phase !== 'awaiting_bet') return 'waiting';
     return 'waiting';
   }
 
@@ -472,6 +687,7 @@ export class GameService {
           bettorSeat: game.round.bettorSeat,
           thirdCard: game.round.thirdCard,
           phase: game.round.phase,
+          turnDeadlineAt: game.round.turnDeadlineAt ?? null,
           lastResult: game.round.lastResult,
         }
       : null;
@@ -486,6 +702,9 @@ export class GameService {
       buyIn: game.buyIn,
       pot: game.pot,
       deckRemaining: game.deck.length,
+      createdAt: game.createdAt,
+      startedAt: game.startedAt,
+      endedAt: game.endedAt,
       players: sorted.map((p) => {
         const isSelf = viewerId === p.id;
         return {

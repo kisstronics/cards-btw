@@ -83,14 +83,18 @@ export class AuthController {
           );
         }
 
-        try {
-          const { accessToken } = this.auth.loginGoogle(profile);
-          return res.redirect(
-            `${clientUrl}/oauth/callback?token=${encodeURIComponent(accessToken)}`,
-          );
-        } catch {
-          return res.redirect(`${clientUrl}/login?error=google_login_failed`);
-        }
+        this.auth
+          .loginGoogle(profile)
+          .then(({ accessToken }) => {
+            if (res.headersSent) return;
+            return res.redirect(
+              `${clientUrl}/oauth/callback?token=${encodeURIComponent(accessToken)}`,
+            );
+          })
+          .catch(() => {
+            if (res.headersSent) return;
+            return res.redirect(`${clientUrl}/login?error=google_login_failed`);
+          });
       },
     )(req, res, () => undefined);
   }
@@ -104,7 +108,7 @@ export class AuthController {
   }
 
   @Post('dev-login')
-  devLogin(@Body() body: { name?: string }) {
+  async devLogin(@Body() body: { name?: string }) {
     if (this.config.get<string>('ALLOW_DEV_LOGIN') === 'false') {
       throw new UnauthorizedException('Dev login is disabled');
     }

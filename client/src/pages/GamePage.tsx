@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState, type CSSProperties } from 'react';
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { useAuth } from '../auth';
+import { AppShell } from '../components/AppShell';
 import { CardView } from '../components/CardView';
 import { connectSocket, getSocket, type GameAck } from '../socket';
 import type { GamePublic, PlayerPublic, PlayerTurnStatus } from '../types';
@@ -22,6 +22,16 @@ function firstName(name: string) {
   return name.trim().split(/\s+/)[0] || name;
 }
 
+function formatWhen(ts?: number | null) {
+  if (!ts) return '—';
+  return new Date(ts).toLocaleString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
 /** Place seats around an oval; index 0 sits at the bottom (you). */
 function seatStyle(index: number, total: number): CSSProperties {
   const angle = Math.PI / 2 + (2 * Math.PI * index) / total;
@@ -40,6 +50,7 @@ function PlayerSeat({
   style,
   handVisible,
   onToggleHand,
+  turnSeconds,
 }: {
   player: PlayerPublic;
   isDealer: boolean;
@@ -47,15 +58,28 @@ function PlayerSeat({
   style: CSSProperties;
   handVisible: boolean;
   onToggleHand?: () => void;
+  turnSeconds?: number | null;
 }) {
   const hasYourHand = isYou && Boolean(player.hand);
   const showCards = hasYourHand && handVisible;
+  const showTimer =
+    player.turnStatus === 'betting' &&
+    typeof turnSeconds === 'number' &&
+    turnSeconds >= 0;
 
   return (
     <div
       className={`seat ${player.turnStatus === 'betting' ? 'active' : ''} ${!player.connected ? 'away' : ''} ${isYou ? 'you' : ''} ${showCards ? 'revealed' : ''}`}
       style={style}
     >
+      {showTimer && (
+        <span
+          className={`turn-timer-badge ${turnSeconds! <= 5 ? 'urgent' : ''}`}
+          aria-label={`${turnSeconds} seconds left`}
+        >
+          {turnSeconds}s
+        </span>
+      )}
       <div className="seat-name">
         <span className="seat-name-text" title={player.name}>
           {isYou ? 'You' : firstName(player.name)}
@@ -82,25 +106,36 @@ function PlayerSeat({
           <CardView card={player.hand![1]} />
         </div>
       )}
-      <div className="seat-chips">{player.chips}</div>
+      <div
+        className={`seat-chips ${player.chips < 0 ? 'negative' : ''}`}
+      >
+        {player.chips}
+      </div>
     </div>
   );
 }
 
 export function GamePage() {
   const { code = '' } = useParams();
-  const { user, logout } = useAuth();
   const navigate = useNavigate();
   const [game, setGame] = useState<GamePublic | null>(null);
   const [betAmount, setBetAmount] = useState(10);
   const [error, setError] = useState('');
   const [copied, setCopied] = useState(false);
   const [handVisible, setHandVisible] = useState(false);
+  const [leaving, setLeaving] = useState(false);
+  const [turnSeconds, setTurnSeconds] = useState<number | null>(null);
+  const leftRef = useRef(false);
 
   useEffect(() => {
+    leftRef.current = false;
+    setLeaving(false);
     const socket = connectSocket();
+    const room = code.toUpperCase();
 
     const onState = (state: GamePublic) => {
+      if (leftRef.current) return;
+      if (state.code !== room) return;
       setGame(state);
       setError('');
     };
@@ -108,23 +143,23 @@ export function GamePage() {
     socket.on('game:state', onState);
 
     socket.emit('game:sync', {}, (ack: GameAck) => {
-      if (ack?.game) {
+      if (leftRef.current) return;
+      if (ack?.game?.code === room) {
         setGame(ack.game);
-        if (ack.game.code !== code.toUpperCase()) {
-          navigate(`/game/${ack.game.code}`, { replace: true });
-        }
-      } else {
-        socket.emit('game:join', { code }, (joinAck: GameAck) => {
-          if (joinAck?.error) setError(joinAck.error);
-          else if (joinAck?.game) setGame(joinAck.game);
-        });
+        return;
       }
+      // Not already seated in this room — try joining by code.
+      socket.emit('game:join', { code: room }, (joinAck: GameAck) => {
+        if (leftRef.current) return;
+        if (joinAck?.error) setError(joinAck.error);
+        else if (joinAck?.game) setGame(joinAck.game);
+      });
     });
 
     return () => {
       socket.off('game:state', onState);
     };
-  }, [code, navigate]);
+  }, [code]);
 
   const bettor = useMemo(() => {
     if (!game?.round) return null;
@@ -137,9 +172,10 @@ export function GamePage() {
   }, [game]);
 
   const maxBet = useMemo(() => {
-    if (!game || !youPlayer) return 0;
-    return Math.min(50, game.pot, youPlayer.chips);
-  }, [game, youPlayer]);
+    if (!game) return 0;
+    // Max bet = board amount (scores may go negative)
+    return Math.max(0, game.pot);
+  }, [game]);
 
   const minBet = useMemo(() => {
     if (maxBet <= 0) return 0;
@@ -150,6 +186,24 @@ export function GamePage() {
     if (maxBet <= 0) return;
     setBetAmount((current) => Math.min(Math.max(current, minBet), maxBet));
   }, [minBet, maxBet]);
+
+  // Shared countdown from server deadline — visible on every client
+  useEffect(() => {
+    const deadline = game?.round?.turnDeadlineAt;
+    const open = game?.round?.phase === 'awaiting_bet' && deadline;
+    if (!open) {
+      setTurnSeconds(null);
+      return;
+    }
+
+    const tick = () => {
+      const left = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+      setTurnSeconds(left);
+    };
+    tick();
+    const id = window.setInterval(tick, 250);
+    return () => window.clearInterval(id);
+  }, [game?.round?.turnDeadlineAt, game?.round?.phase]);
 
   // Hide cards again whenever a new hand is dealt
   const handKey = game?.you?.hand
@@ -184,42 +238,67 @@ export function GamePage() {
   }
 
   function leave() {
-    emit('game:leave', {});
-    navigate('/');
+    if (leaving) return;
+    setLeaving(true);
+    leftRef.current = true;
+    const socket = getSocket() || connectSocket();
+    socket.emit('game:leave', {}, () => {
+      navigate('/', { replace: true });
+    });
+    // Fallback if ack never arrives
+    setTimeout(() => navigate('/', { replace: true }), 800);
   }
 
   if (!game) {
     return (
-      <div className="page center">
-        <p>{error || 'Loading table…'}</p>
-        {error && (
-          <Link className="btn secondary" to="/">
-            Back to lobby
-          </Link>
-        )}
-      </div>
+      <AppShell>
+        <div className="center">
+          <p>{error || 'Loading table…'}</p>
+          {error && (
+            <Link className="btn secondary" to="/">
+              Back to lobby
+            </Link>
+          )}
+        </div>
+      </AppShell>
     );
   }
 
   return (
-    <div className="page game-page">
-      <header className="topbar">
-        <div className="room-meta">
-          <span className="brand-sm">Between</span>
+    <AppShell
+      title="Table"
+      trailing={
+        <button
+          type="button"
+          className="btn secondary leave-btn"
+          onClick={leave}
+          disabled={leaving}
+        >
+          {leaving ? 'Leaving…' : 'Leave'}
+        </button>
+      }
+    >
+      <div className="game-page">
+        <div className="room-meta game-room-meta">
           <button type="button" className="code-pill" onClick={copyCode}>
             {game.code} {copied ? '✓' : 'copy'}
           </button>
         </div>
-        <div className="user-chip">
-          <span className="user-chip-name">{user?.name}</span>
-          <button type="button" className="linkish" onClick={leave}>
-            Leave
-          </button>
-          <button type="button" className="linkish" onClick={logout}>
-            Sign out
-          </button>
-        </div>
-      </header>
+
+        <dl className="game-times board-times">
+          <div>
+            <dt>Created</dt>
+            <dd>{formatWhen(game.createdAt)}</dd>
+          </div>
+          <div>
+            <dt>Started</dt>
+            <dd>{formatWhen(game.startedAt)}</dd>
+          </div>
+          <div>
+            <dt>Ended</dt>
+            <dd>{formatWhen(game.endedAt)}</dd>
+          </div>
+        </dl>
 
       {game.status === 'lobby' && (
         <section className="lobby-wait">
@@ -317,6 +396,9 @@ export function GamePage() {
                 isYou={p.id === game.you?.id}
                 style={seatStyle(i, seatedPlayers.length)}
                 handVisible={handVisible}
+                turnSeconds={
+                  p.turnStatus === 'betting' ? turnSeconds : null
+                }
                 onToggleHand={
                   p.id === game.you?.id
                     ? () => setHandVisible((v) => !v)
@@ -425,6 +507,7 @@ export function GamePage() {
       )}
 
       {error && <p className="error">{error}</p>}
-    </div>
+      </div>
+    </AppShell>
   );
 }

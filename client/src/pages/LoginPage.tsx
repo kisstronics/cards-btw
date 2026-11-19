@@ -45,13 +45,16 @@ export function LoginPage() {
   }
 
   return (
-    <div className="page login-page">
-      <div className="login-panel">
+    <div className="mobile-shell login-page">
+      <div className="login-panel app-main">
         <p className="brand">Between</p>
         <h1>Card table nights, online</h1>
         <p className="lede">
           Create a room, invite friends, and play Between until the host ends
           the night.
+        </p>
+        <p className="muted">
+          Inspired by Narayan Blue Man, Pawan Sir, Venkatesh Sir, and Sai Sir.
         </p>
 
         {googleEnabled && (

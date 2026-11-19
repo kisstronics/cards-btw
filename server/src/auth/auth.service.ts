@@ -29,21 +29,21 @@ export class AuthService {
     };
   }
 
-  loginDev(name: string) {
-    const user = this.users.createDevUser(name);
+  async loginDev(name: string) {
+    const user = await this.users.createDevUser(name);
     return {
       user: this.toPublic(user),
       accessToken: this.signToken(user),
     };
   }
 
-  loginGoogle(profile: {
+  async loginGoogle(profile: {
     id: string;
     emails?: { value: string }[];
     displayName?: string;
     photos?: { value: string }[];
   }) {
-    const user = this.users.upsertFromGoogle(profile);
+    const user = await this.users.upsertFromGoogle(profile);
     return {
       user: this.toPublic(user),
       accessToken: this.signToken(user),

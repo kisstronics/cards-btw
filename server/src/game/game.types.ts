@@ -28,6 +28,8 @@ export interface RoundPublic {
   bettorSeat: number;
   thirdCard: Card | null;
   phase: RoundPhase;
+  /** Epoch ms when the current bettor's turn expires (auto-skip). */
+  turnDeadlineAt?: number | null;
   lastResult?: {
     bettorId: string;
     bettorName: string;
@@ -47,6 +49,9 @@ export interface GamePublic {
   buyIn: number;
   pot: number;
   deckRemaining: number;
+  createdAt: number;
+  startedAt: number | null;
+  endedAt: number | null;
   players: PlayerPublic[];
   round: RoundPublic | null;
   you?: {
@@ -72,6 +77,8 @@ export interface InternalPlayer {
   hand: [Card, Card] | null;
   /** Players who already acted this orbit (bet resolved or skipped). */
   actedThisOrbit: boolean;
+  /** Hands this player bet or skipped in. */
+  roundsPlayed: number;
 }
 
 export interface InternalRound {
@@ -79,6 +86,7 @@ export interface InternalRound {
   bettorSeat: number;
   thirdCard: Card | null;
   phase: RoundPhase;
+  turnDeadlineAt?: number | null;
   lastResult?: RoundPublic['lastResult'];
 }
 
@@ -94,4 +102,6 @@ export interface InternalGame {
   players: InternalPlayer[];
   round: InternalRound | null;
   createdAt: number;
+  startedAt: number | null;
+  endedAt: number | null;
 }

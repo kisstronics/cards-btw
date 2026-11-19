@@ -39,6 +39,8 @@ export interface RoundPublic {
   bettorSeat: number;
   thirdCard: Card | null;
   phase: RoundPhase;
+  /** Epoch ms when the current bettor's turn expires (auto-skip). */
+  turnDeadlineAt?: number | null;
   lastResult?: {
     bettorId: string;
     bettorName: string;
@@ -58,6 +60,9 @@ export interface GamePublic {
   buyIn: number;
   pot: number;
   deckRemaining: number;
+  createdAt: number;
+  startedAt: number | null;
+  endedAt: number | null;
   players: PlayerPublic[];
   round: RoundPublic | null;
   you?: {
