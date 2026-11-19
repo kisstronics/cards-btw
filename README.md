@@ -43,6 +43,19 @@ CLIENT_URL=http://localhost:5173
 
 3. Add the callback URL to your Google OAuth client.
 
+## Deploy notes (Vercel client)
+
+OAuth lands on `/oauth/callback`. Vercel must rewrite unknown paths to `index.html` (see `client/vercel.json` / root `vercel.json`). Redeploy the client after adding that file.
+
+Production server env should include:
+
+```env
+CLIENT_URL=https://cards.sknics.com
+GOOGLE_CALLBACK_URL=https://<your-api-host>/auth/google/callback
+```
+
+And Google Cloud OAuth must allow that API callback URL.
+
 ## Scripts
 
 | Command | Description |
