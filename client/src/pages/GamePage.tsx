@@ -166,11 +166,6 @@ export function GamePage() {
     return game.players.find((p) => p.seat === game.round!.bettorSeat) || null;
   }, [game]);
 
-  const youPlayer = useMemo(() => {
-    if (!game?.you) return null;
-    return game.players.find((p) => p.id === game.you!.id) || null;
-  }, [game]);
-
   const maxBet = useMemo(() => {
     if (!game) return 0;
     // Max bet = board amount (scores may go negative)
