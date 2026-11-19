@@ -28,7 +28,8 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @WebSocketServer()
   server: Server;
 
-  private timers = new Map<string, NodeJS.Timeout>();
+  private revealTimers = new Map<string, NodeJS.Timeout>();
+  private turnTimers = new Map<string, NodeJS.Timeout>();
 
   constructor(
     private readonly games: GameService,
@@ -46,8 +47,21 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
         client.disconnect();
         return;
       }
-      const payload = this.jwt.verify<{ sub: string; name?: string }>(token);
-      const user = this.users.findById(payload.sub);
+      const payload = this.jwt.verify<{
+        sub: string;
+        email?: string;
+        name?: string;
+        provider?: 'google' | 'dev';
+      }>(token);
+      let user = await this.users.findById(payload.sub);
+      if (!user && payload.email) {
+        user = await this.users.restoreFromClaims({
+          id: payload.sub,
+          email: payload.email,
+          name: payload.name,
+          provider: payload.provider,
+        });
+      }
       if (!user) {
         client.emit('error', { message: 'Unauthorized' });
         client.disconnect();
@@ -57,11 +71,12 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
       client.userName = user.name;
       client.userPicture = user.picture;
 
-      const state = this.games.attachSocket(user.id, client.id);
+      const state = await this.games.attachSocket(user.id, client.id);
       if (state) {
         client.join(state.code);
         client.emit('game:state', state);
         this.broadcast(state.code);
+        this.armTurnTimer(state.code);
       } else {
         client.emit('lobby:ready', { ok: true });
       }
@@ -71,45 +86,19 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     }
   }
 
-  handleDisconnect(client: AuthSocket) {
+  async handleDisconnect(client: AuthSocket) {
     if (!client.userId) return;
-    const state = this.games.detachSocket(client.userId, client.id);
+    const state = await this.games.detachSocket(client.userId, client.id);
     if (state) {
       this.broadcast(state.code);
     }
   }
 
   @SubscribeMessage('game:create')
-  onCreate(
-    @ConnectedSocket() client: AuthSocket,
-    @MessageBody() body: { buyIn?: number },
-  ) {
+  async onCreate(@ConnectedSocket() client: AuthSocket) {
     if (!client.userId) return { error: 'Unauthorized' };
     try {
-      const state = this.games.createGame(
-        {
-          id: client.userId,
-          name: client.userName || 'Player',
-          picture: client.userPicture,
-        },
-        body?.buyIn,
-      );
-      client.join(state.code);
-      this.broadcast(state.code);
-      return { ok: true, game: state };
-    } catch (e) {
-      return { error: (e as Error).message };
-    }
-  }
-
-  @SubscribeMessage('game:join')
-  onJoin(
-    @ConnectedSocket() client: AuthSocket,
-    @MessageBody() body: { code: string },
-  ) {
-    if (!client.userId) return { error: 'Unauthorized' };
-    try {
-      const state = this.games.joinGame(body.code, {
+      const state = await this.games.createGame({
         id: client.userId,
         name: client.userName || 'Player',
         picture: client.userPicture,
@@ -122,26 +111,50 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     }
   }
 
-  @SubscribeMessage('game:leave')
-  onLeave(@ConnectedSocket() client: AuthSocket) {
-    if (!client.userId) return { error: 'Unauthorized' };
-    const state = this.games.leaveGame(client.userId);
-    if (state) {
-      client.leave(state.code);
-      this.broadcast(state.code);
-    }
-    return { ok: true };
-  }
-
-  @SubscribeMessage('game:start')
-  onStart(
+  @SubscribeMessage('game:join')
+  async onJoin(
     @ConnectedSocket() client: AuthSocket,
     @MessageBody() body: { code: string },
   ) {
     if (!client.userId) return { error: 'Unauthorized' };
     try {
-      const state = this.games.startGame(body.code, client.userId);
+      const state = await this.games.joinGame(body.code, {
+        id: client.userId,
+        name: client.userName || 'Player',
+        picture: client.userPicture,
+      });
+      client.join(state.code);
       this.broadcast(state.code);
+      this.armTurnTimer(state.code);
+      return { ok: true, game: state };
+    } catch (e) {
+      return { error: (e as Error).message };
+    }
+  }
+
+  @SubscribeMessage('game:leave')
+  async onLeave(@ConnectedSocket() client: AuthSocket) {
+    if (!client.userId) return { error: 'Unauthorized' };
+    const previousCode = this.games.getPublicForPlayer(client.userId)?.code;
+    const state = await this.games.leaveGame(client.userId);
+    const code = state?.code || previousCode;
+    if (code) {
+      client.leave(code);
+      if (state) this.broadcast(code);
+    }
+    return { ok: true, left: true };
+  }
+
+  @SubscribeMessage('game:start')
+  async onStart(
+    @ConnectedSocket() client: AuthSocket,
+    @MessageBody() body: { code: string },
+  ) {
+    if (!client.userId) return { error: 'Unauthorized' };
+    try {
+      const state = await this.games.startGame(body.code, client.userId);
+      this.broadcast(state.code);
+      this.armTurnTimer(state.code);
       return { ok: true, game: state };
     } catch (e) {
       return { error: (e as Error).message };
@@ -149,14 +162,15 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
   }
 
   @SubscribeMessage('game:end')
-  onEnd(
+  async onEnd(
     @ConnectedSocket() client: AuthSocket,
     @MessageBody() body: { code: string },
   ) {
     if (!client.userId) return { error: 'Unauthorized' };
     try {
-      this.clearTimer(body.code);
-      const state = this.games.endGame(body.code, client.userId);
+      this.clearRevealTimer(body.code);
+      this.clearTurnTimer(body.code);
+      const state = await this.games.endGame(body.code, client.userId);
       this.broadcast(state.code);
       return { ok: true, game: state };
     } catch (e) {
@@ -165,20 +179,27 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
   }
 
   @SubscribeMessage('game:bet')
-  onBet(
+  async onBet(
     @ConnectedSocket() client: AuthSocket,
     @MessageBody() body: { code: string; amount: number },
   ) {
     if (!client.userId) return { error: 'Unauthorized' };
     try {
-      const result = this.games.placeBet(body.code, client.userId, body.amount);
+      this.clearTurnTimer(body.code);
+      const result = await this.games.placeBet(
+        body.code,
+        client.userId,
+        body.amount,
+      );
       this.broadcast(result.public.code);
-      this.clearTimer(result.public.code);
-      this.timers.set(
+      this.clearRevealTimer(result.public.code);
+      this.revealTimers.set(
         result.public.code,
         setTimeout(() => {
-          const next = result.next();
-          this.broadcast(next.code);
+          void result.next().then((next) => {
+            this.broadcast(next.code);
+            this.armTurnTimer(next.code);
+          });
         }, result.delayMs),
       );
       return { ok: true };
@@ -188,14 +209,16 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
   }
 
   @SubscribeMessage('game:skip')
-  onSkip(
+  async onSkip(
     @ConnectedSocket() client: AuthSocket,
     @MessageBody() body: { code: string },
   ) {
     if (!client.userId) return { error: 'Unauthorized' };
     try {
-      const state = this.games.skipBet(body.code, client.userId);
+      this.clearTurnTimer(body.code);
+      const state = await this.games.skipBet(body.code, client.userId);
       this.broadcast(state.code);
+      this.armTurnTimer(state.code);
       return { ok: true };
     } catch (e) {
       return { error: (e as Error).message };
@@ -208,9 +231,31 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     const state = this.games.getPublicForPlayer(client.userId);
     if (state) {
       client.join(state.code);
+      this.armTurnTimer(state.code);
       return { ok: true, game: state };
     }
     return { ok: true, game: null };
+  }
+
+  private armTurnTimer(code: string) {
+    this.clearTurnTimer(code);
+    const remaining = this.games.turnMsRemaining(code);
+    if (remaining == null) return;
+
+    this.turnTimers.set(
+      code,
+      setTimeout(() => {
+        void (async () => {
+          try {
+            const state = await this.games.autoSkipTurn(code);
+            this.broadcast(state.code);
+            this.armTurnTimer(state.code);
+          } catch {
+            // Game may have ended or changed phase
+          }
+        })();
+      }, remaining),
+    );
   }
 
   private broadcast(code: string) {
@@ -230,11 +275,19 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     }
   }
 
-  private clearTimer(code: string) {
-    const t = this.timers.get(code);
+  private clearRevealTimer(code: string) {
+    const t = this.revealTimers.get(code);
     if (t) {
       clearTimeout(t);
-      this.timers.delete(code);
+      this.revealTimers.delete(code);
+    }
+  }
+
+  private clearTurnTimer(code: string) {
+    const t = this.turnTimers.get(code);
+    if (t) {
+      clearTimeout(t);
+      this.turnTimers.delete(code);
     }
   }
 }

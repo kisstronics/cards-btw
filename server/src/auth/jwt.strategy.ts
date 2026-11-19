@@ -17,15 +17,15 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     });
   }
 
-  validate(payload: {
+  async validate(payload: {
     sub: string;
     email?: string;
     name?: string;
     provider?: 'google' | 'dev';
   }) {
-    let user = this.users.findById(payload.sub);
+    let user = await this.users.findById(payload.sub);
     if (!user && payload.email) {
-      user = this.users.restoreFromClaims({
+      user = await this.users.restoreFromClaims({
         id: payload.sub,
         email: payload.email,
         name: payload.name,

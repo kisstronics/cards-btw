@@ -58,3 +58,35 @@ export async function fetchMe() {
 export function googleLoginUrl() {
   return api('/auth/google');
 }
+
+export type GameListPlayerStat = {
+  id: string;
+  name: string;
+  score: number;
+  roundsPlayed: number;
+};
+
+export type GameListItem = {
+  code: string;
+  status: string;
+  playerCount: number;
+  maxPlayers: number;
+  pot: number;
+  ownerName: string;
+  createdAt: number;
+  startedAt?: number | null;
+  endedAt?: number | null;
+  joinable: boolean;
+  canRejoin?: boolean;
+  players?: GameListPlayerStat[];
+};
+
+export async function fetchGames() {
+  const token = getToken();
+  if (!token) throw new Error('Not signed in');
+  const res = await fetch(api('/games'), {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) throw new Error('Could not load games');
+  return res.json() as Promise<{ games: GameListItem[] }>;
+}
