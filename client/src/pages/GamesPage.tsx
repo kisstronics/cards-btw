@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { fetchGames, type GameListItem } from '../api';
 import { AppShell } from '../components/AppShell';
+import { Loader } from '../components/Loader';
 import { connectSocket, getSocket, type GameAck } from '../socket';
 
 function statusLabel(status: string) {
@@ -77,7 +78,7 @@ export function GamesPage() {
           enter from the lobby.
         </p>
 
-        {loading && <p className="muted">Loading…</p>}
+        {loading && <Loader label="Loading games…" size="md" />}
         {error && <p className="error">{error}</p>}
 
         {!loading && games.length === 0 && (
@@ -146,11 +147,13 @@ export function GamesPage() {
                   disabled={joining === g.code}
                   onClick={() => join(g.code)}
                 >
-                  {joining === g.code
-                    ? 'Joining…'
-                    : g.canRejoin
-                      ? 'Rejoin'
-                      : 'Join'}
+                  {joining === g.code ? (
+                    <Loader label="" size="sm" />
+                  ) : g.canRejoin ? (
+                    'Rejoin'
+                  ) : (
+                    'Join'
+                  )}
                 </button>
               ) : (
                 <span className="game-list-locked muted">

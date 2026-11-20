@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { AppShell } from '../components/AppShell';
 import { CardView } from '../components/CardView';
+import { Loader } from '../components/Loader';
 import { connectSocket, getSocket, type GameAck } from '../socket';
 import type { GamePublic, PlayerPublic, PlayerTurnStatus } from '../types';
 
@@ -22,14 +23,55 @@ function firstName(name: string) {
   return name.trim().split(/\s+/)[0] || name;
 }
 
-function formatWhen(ts?: number | null) {
-  if (!ts) return '—';
-  return new Date(ts).toLocaleString(undefined, {
-    month: 'short',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  });
+function LeaveIcon() {
+  return (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path
+        d="M10 17l5-5-5-5"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M15 12H4"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+      />
+      <path
+        d="M20 4v16"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+function EndGameIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <rect
+        x="6"
+        y="6"
+        width="12"
+        height="12"
+        rx="2"
+        fill="currentColor"
+      />
+    </svg>
+  );
+}
+
+function MoreIcon() {
+  return (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <circle cx="5" cy="12" r="2" />
+      <circle cx="12" cy="12" r="2" />
+      <circle cx="19" cy="12" r="2" />
+    </svg>
+  );
 }
 
 /** Place seats around an oval; index 0 sits at the bottom (you). */
@@ -37,9 +79,10 @@ function seatStyle(index: number, total: number): CSSProperties {
   const angle = Math.PI / 2 + (2 * Math.PI * index) / total;
   const x = Math.cos(angle);
   const y = Math.sin(angle);
+  // Slightly tighter vertical spread so revealed hand + bets fit one screen
   return {
-    left: `${50 + x * 46}%`,
-    top: `${50 + y * 42}%`,
+    left: `${50 + x * 44}%`,
+    top: `${50 + y * 36}%`,
   };
 }
 
@@ -122,8 +165,11 @@ export function GamePage() {
   const [betAmount, setBetAmount] = useState(10);
   const [error, setError] = useState('');
   const [copied, setCopied] = useState(false);
-  const [handVisible, setHandVisible] = useState(false);
+  const [handVisible, setHandVisible] = useState(true);
   const [leaving, setLeaving] = useState(false);
+  const [actionPending, setActionPending] = useState<
+    'bet' | 'skip' | 'start' | 'end' | null
+  >(null);
   const [turnSeconds, setTurnSeconds] = useState<number | null>(null);
   const leftRef = useRef(false);
 
@@ -137,6 +183,7 @@ export function GamePage() {
       if (leftRef.current) return;
       if (state.code !== room) return;
       setGame(state);
+      setActionPending(null);
       setError('');
     };
 
@@ -200,12 +247,12 @@ export function GamePage() {
     return () => window.clearInterval(id);
   }, [game?.round?.turnDeadlineAt, game?.round?.phase]);
 
-  // Hide cards again whenever a new hand is dealt
+  // Show self cards by default whenever a new hand is dealt
   const handKey = game?.you?.hand
     ? `${game.you.hand[0].rank}${game.you.hand[0].suit}-${game.you.hand[1].rank}${game.you.hand[1].suit}`
     : '';
   useEffect(() => {
-    setHandVisible(false);
+    if (handKey) setHandVisible(true);
   }, [handKey]);
 
   /** Rotate so the current player sits at the bottom of the oval. */
@@ -219,10 +266,29 @@ export function GamePage() {
     return [...ordered.slice(youIndex), ...ordered.slice(0, youIndex)];
   }, [game]);
 
-  function emit(event: string, payload: object) {
+  function emit(
+    event: string,
+    payload: object,
+    action: 'bet' | 'skip' | 'start' | 'end',
+  ) {
+    if (actionPending) return;
+    setActionPending(action);
+    setError('');
     const socket = getSocket() || connectSocket();
+    // Safety: don't leave the button spinning forever if state never arrives
+    const clearTimer = window.setTimeout(() => setActionPending(null), 8000);
     socket.emit(event, payload, (ack: GameAck) => {
-      if (ack?.error) setError(ack.error);
+      if (ack?.error) {
+        window.clearTimeout(clearTimer);
+        setActionPending(null);
+        setError(ack.error);
+        return;
+      }
+      if (ack?.game) {
+        window.clearTimeout(clearTimer);
+        setGame(ack.game);
+        setActionPending(null);
+      }
     });
   }
 
@@ -248,11 +314,15 @@ export function GamePage() {
     return (
       <AppShell>
         <div className="center">
-          <p>{error || 'Loading table…'}</p>
-          {error && (
-            <Link className="btn secondary" to="/">
-              Back to lobby
-            </Link>
+          {error ? (
+            <>
+              <p className="error">{error}</p>
+              <Link className="btn secondary" to="/">
+                Back to lobby
+              </Link>
+            </>
+          ) : (
+            <Loader label="Joining table…" size="lg" />
           )}
         </div>
       </AppShell>
@@ -263,37 +333,56 @@ export function GamePage() {
     <AppShell
       title="Table"
       trailing={
-        <button
-          type="button"
-          className="btn secondary leave-btn"
-          onClick={leave}
-          disabled={leaving}
-        >
-          {leaving ? 'Leaving…' : 'Leave'}
-        </button>
+        <div className="game-nav-actions">
+          <Link
+            to={`/game/${game.code}/info`}
+            className="icon-btn game-nav-btn"
+            aria-label="Game info"
+            title="Game info"
+          >
+            <MoreIcon />
+          </Link>
+          {game.you?.canEnd && (
+            <button
+              type="button"
+              className="icon-btn game-nav-btn danger"
+              onClick={() => emit('game:end', { code: game.code }, 'end')}
+              disabled={Boolean(actionPending)}
+              aria-label={actionPending === 'end' ? 'Ending game' : 'End game'}
+              title="End game"
+            >
+              {actionPending === 'end' ? (
+                <Loader label="" size="sm" />
+              ) : (
+                <EndGameIcon />
+              )}
+            </button>
+          )}
+          <button
+            type="button"
+            className="icon-btn game-nav-btn leave-btn"
+            onClick={leave}
+            disabled={leaving || Boolean(actionPending)}
+            aria-label={leaving ? 'Leaving' : 'Leave table'}
+            title={leaving ? 'Leaving…' : 'Leave'}
+          >
+            {leaving ? <Loader label="" size="sm" /> : <LeaveIcon />}
+          </button>
+        </div>
       }
     >
-      <div className="game-page">
-        <div className="room-meta game-room-meta">
+      <div
+        className={`game-page${game.status === 'playing' ? ' is-playing' : ''}`}
+      >
+        <div className="game-top-bar">
           <button type="button" className="code-pill" onClick={copyCode}>
             {game.code} {copied ? '✓' : 'copy'}
           </button>
+          <div className="board-amount" aria-label="Board amount">
+            <span className="board-amount-label">Board</span>
+            <strong className="board-amount-value">{game.pot}</strong>
+          </div>
         </div>
-
-        <dl className="game-times board-times">
-          <div>
-            <dt>Created</dt>
-            <dd>{formatWhen(game.createdAt)}</dd>
-          </div>
-          <div>
-            <dt>Started</dt>
-            <dd>{formatWhen(game.startedAt)}</dd>
-          </div>
-          <div>
-            <dt>Ended</dt>
-            <dd>{formatWhen(game.endedAt)}</dd>
-          </div>
-        </dl>
 
       {game.status === 'lobby' && (
         <section className="lobby-wait">
@@ -317,9 +406,16 @@ export function GamePage() {
             <button
               className="btn primary"
               type="button"
-              onClick={() => emit('game:start', { code: game.code })}
+              onClick={() =>
+                emit('game:start', { code: game.code }, 'start')
+              }
+              disabled={Boolean(actionPending)}
             >
-              Start game
+              {actionPending === 'start' ? (
+                <Loader label="Starting…" size="sm" />
+              ) : (
+                'Start game'
+              )}
             </button>
           )}
           {!game.you?.isOwner && (
@@ -330,24 +426,6 @@ export function GamePage() {
 
       {game.status === 'playing' && game.round && (
         <section className="table">
-          <div className="table-meta">
-            <div className="board-amount" aria-label="Board amount">
-              <span className="board-amount-label">Board</span>
-              <strong className="board-amount-value">{game.pot}</strong>
-            </div>
-            {game.you?.canEnd ? (
-              <button
-                className="btn danger end-game-btn"
-                type="button"
-                onClick={() => emit('game:end', { code: game.code })}
-              >
-                End game
-              </button>
-            ) : (
-              <span className="table-meta-spacer" aria-hidden="true" />
-            )}
-          </div>
-
           <div className="table-arena">
             <div className="table-felt">
               <div className="deck-stack" title={`${game.deckRemaining} left`}>
@@ -373,14 +451,6 @@ export function GamePage() {
                 {game.round.phase === 'resolved' &&
                   (game.round.lastResult?.won ? ' · won!' : ' · lost')}
               </p>
-
-              {game.round.lastResult && (
-                <p
-                  className={`result-banner ${game.round.lastResult.won ? 'win' : 'lose'}`}
-                >
-                  {game.round.lastResult.message}
-                </p>
-              )}
             </div>
 
             {seatedPlayers.map((p, i) => (
@@ -403,6 +473,15 @@ export function GamePage() {
             ))}
           </div>
 
+          {game.round.lastResult && (
+            <p
+              className={`result-banner ${game.round.lastResult.won ? 'win' : 'lose'}`}
+              role="status"
+            >
+              {game.round.lastResult.message}
+            </p>
+          )}
+
           <div className="controls">
             {game.you?.canBet && (
               <div className="bet-panel">
@@ -410,7 +489,7 @@ export function GamePage() {
                   <button
                     type="button"
                     className="btn secondary bet-step"
-                    disabled={betAmount <= minBet}
+                    disabled={Boolean(actionPending) || betAmount <= minBet}
                     onClick={() =>
                       setBetAmount((v) => Math.max(minBet, v - 10))
                     }
@@ -425,7 +504,7 @@ export function GamePage() {
                   <button
                     type="button"
                     className="btn secondary bet-step"
-                    disabled={betAmount >= maxBet}
+                    disabled={Boolean(actionPending) || betAmount >= maxBet}
                     onClick={() =>
                       setBetAmount((v) => Math.min(maxBet, v + 10))
                     }
@@ -438,31 +517,66 @@ export function GamePage() {
                   <button
                     type="button"
                     className="btn secondary"
-                    disabled={maxBet <= 0 || betAmount === maxBet}
+                    disabled={
+                      Boolean(actionPending) ||
+                      maxBet <= 0 ||
+                      betAmount === maxBet
+                    }
                     onClick={() => setBetAmount(maxBet)}
                   >
-                    Max ({maxBet})
+                    Max
                   </button>
                   <button
                     className="btn primary"
                     type="button"
-                    disabled={maxBet <= 0}
+                    disabled={Boolean(actionPending) || maxBet <= 0}
                     onClick={() =>
-                      emit('game:bet', { code: game.code, amount: betAmount })
+                      emit(
+                        'game:bet',
+                        { code: game.code, amount: betAmount },
+                        'bet',
+                      )
                     }
                   >
-                    Bet {betAmount}
+                    {actionPending === 'bet' ? (
+                      <Loader label="" size="sm" />
+                    ) : (
+                      'Bet'
+                    )}
                   </button>
+                  {game.you?.canSkip && (
+                    <button
+                      className="btn secondary"
+                      type="button"
+                      disabled={Boolean(actionPending)}
+                      onClick={() =>
+                        emit('game:skip', { code: game.code }, 'skip')
+                      }
+                    >
+                      {actionPending === 'skip' ? (
+                        <Loader label="" size="sm" />
+                      ) : (
+                        'Skip'
+                      )}
+                    </button>
+                  )}
                 </div>
               </div>
             )}
-            {game.you?.canSkip && (
+            {game.you?.canSkip && !game.you?.canBet && (
               <button
                 className="btn secondary"
                 type="button"
-                onClick={() => emit('game:skip', { code: game.code })}
+                disabled={Boolean(actionPending)}
+                onClick={() =>
+                  emit('game:skip', { code: game.code }, 'skip')
+                }
               >
-                Skip
+                {actionPending === 'skip' ? (
+                  <Loader label="" size="sm" />
+                ) : (
+                  'Skip'
+                )}
               </button>
             )}
             {!game.you?.isBettor && game.round.phase === 'awaiting_bet' && (
@@ -475,7 +589,7 @@ export function GamePage() {
               !game.you.canBet &&
               game.round.phase === 'awaiting_bet' && (
                 <p className="muted controls-wait">
-                  No between on your cards — skip to continue
+                  No between — skip to continue
                 </p>
               )}
           </div>
