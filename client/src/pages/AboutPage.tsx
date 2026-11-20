@@ -1,4 +1,4 @@
-import { AppShell } from '../components/AppShell';
+import { InfoLayout } from '../components/InfoLayout';
 
 const inspirations = [
   'Narayan Blue Man',
@@ -9,8 +9,9 @@ const inspirations = [
 
 export function AboutPage() {
   return (
-    <AppShell title="Who we are">
+    <InfoLayout title="Who we are">
       <section className="content-page about-page">
+        <p className="eyebrow">About</p>
         <h1>Who we are</h1>
         <p>
           Between is a multiplayer card table for friends — quick hands, a
@@ -31,6 +32,6 @@ export function AboutPage() {
           Built with respect for the tables they kept lively.
         </p>
       </section>
-    </AppShell>
+    </InfoLayout>
   );
 }

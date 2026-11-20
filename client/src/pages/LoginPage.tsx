@@ -1,15 +1,16 @@
 import { useEffect, useState, type FormEvent } from 'react';
-import { Navigate, useSearchParams } from 'react-router-dom';
+import { Link, Navigate, useSearchParams } from 'react-router-dom';
 import { googleLoginUrl } from '../api';
 import { useAuth } from '../auth';
+import { useTheme } from '../theme';
 
 export function LoginPage() {
   const { user, loading, googleEnabled, allowDevLogin, loginDev } = useAuth();
+  const { theme, toggleTheme } = useTheme();
   const [params] = useSearchParams();
   const [name, setName] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
-
   useEffect(() => {
     const fromQuery = params.get('error');
     if (!fromQuery) return;
@@ -23,8 +24,19 @@ export function LoginPage() {
     setError(nice[fromQuery] || fromQuery);
   }, [params]);
 
-  if (!loading && user) {
+  // Auto-login: never flash the login form while restoring a stored session.
+  if (user) {
     return <Navigate to="/" replace />;
+  }
+
+  if (loading) {
+    return (
+      <div className="mobile-shell">
+        <div className="app-main center">
+          <p>Signing you in…</p>
+        </div>
+      </div>
+    );
   }
 
   async function onDevLogin(e: FormEvent) {
@@ -46,6 +58,15 @@ export function LoginPage() {
 
   return (
     <div className="mobile-shell login-page">
+      <button
+        type="button"
+        className="icon-btn theme-toggle login-theme-toggle"
+        onClick={toggleTheme}
+        aria-label={theme === 'light' ? 'Switch to dark mode' : 'Switch to light mode'}
+        title={theme === 'light' ? 'Dark mode' : 'Light mode'}
+      >
+        {theme === 'light' ? '☾' : '☀'}
+      </button>
       <div className="login-panel app-main">
         <p className="brand">Between</p>
         <h1>Card table nights, online</h1>
@@ -86,6 +107,21 @@ export function LoginPage() {
 
         {error && <p className="error">{error}</p>}
       </div>
+
+      <footer className="site-footer gate-footer">
+        <nav className="footer-links" aria-label="Site">
+          <Link className="footer-link" to="/about">
+            Who we are
+          </Link>
+          <Link className="footer-link" to="/privacy">
+            Privacy
+          </Link>
+          <Link className="footer-link" to="/contact">
+            Contact us
+          </Link>
+        </nav>
+        <p className="footer-copy">Knics@2026</p>
+      </footer>
     </div>
   );
 }

@@ -2,10 +2,12 @@ import { Navigate, Route, Routes } from 'react-router-dom';
 import { useAuth } from './auth';
 import { AboutPage } from './pages/AboutPage';
 import { AuthCallbackPage } from './pages/AuthCallbackPage';
+import { ContactPage } from './pages/ContactPage';
 import { GamePage } from './pages/GamePage';
 import { GamesPage } from './pages/GamesPage';
 import { LobbyPage } from './pages/LobbyPage';
 import { LoginPage } from './pages/LoginPage';
+import { PrivacyPage } from './pages/PrivacyPage';
 
 function Protected({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();
@@ -44,14 +46,9 @@ export default function App() {
           </Protected>
         }
       />
-      <Route
-        path="/about"
-        element={
-          <Protected>
-            <AboutPage />
-          </Protected>
-        }
-      />
+      <Route path="/about" element={<AboutPage />} />
+      <Route path="/privacy" element={<PrivacyPage />} />
+      <Route path="/contact" element={<ContactPage />} />
       <Route
         path="/game/:code"
         element={

@@ -33,12 +33,14 @@ function userFromJwt(token: string): User | null {
       email?: string;
       name?: string;
       provider?: 'google' | 'dev';
+      picture?: string;
     };
     if (!payload.sub || !payload.email) return null;
     return {
       id: payload.sub,
       email: payload.email,
       name: payload.name || payload.email.split('@')[0],
+      picture: payload.picture,
       provider: payload.provider || 'google',
     };
   } catch {
@@ -48,26 +50,40 @@ function userFromJwt(token: string): User | null {
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(() => Boolean(getToken()));
   const [googleEnabled, setGoogleEnabled] = useState(false);
   const [allowDevLogin, setAllowDevLogin] = useState(true);
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
+      // Session restore must not depend on auth-status succeeding.
+      const token = getToken();
+      if (token) {
+        try {
+          const me = (await fetchMe()) || userFromJwt(token);
+          if (!cancelled) setUser(me);
+        } catch {
+          if (!cancelled) {
+            const fallback = userFromJwt(token);
+            if (fallback) setUser(fallback);
+            else {
+              setToken(null);
+              setUser(null);
+            }
+          }
+        }
+      }
+      if (!cancelled) setLoading(false);
+
       try {
         const status = await fetchAuthStatus();
         if (!cancelled) {
           setGoogleEnabled(status.enabled);
           setAllowDevLogin(status.allowDevLogin);
         }
-        const token = getToken();
-        if (token) {
-          const me = (await fetchMe()) || userFromJwt(token);
-          if (!cancelled) setUser(me);
-        }
-      } finally {
-        if (!cancelled) setLoading(false);
+      } catch {
+        // Keep defaults if status endpoint is unreachable.
       }
     })();
     return () => {
