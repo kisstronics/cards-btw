@@ -1,13 +1,14 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { AppShell } from '../components/AppShell';
+import { Loader } from '../components/Loader';
 import { connectSocket, getSocket, type GameAck } from '../socket';
 
 export function LobbyPage() {
   const navigate = useNavigate();
   const [joinCode, setJoinCode] = useState('');
   const [error, setError] = useState('');
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusy] = useState<'create' | 'join' | null>(null);
   const [resumeCode, setResumeCode] = useState<string | null>(null);
 
   useEffect(() => {
@@ -20,11 +21,12 @@ export function LobbyPage() {
 
   function createGame(e: FormEvent) {
     e.preventDefault();
-    setBusy(true);
+    if (busy) return;
+    setBusy('create');
     setError('');
     const socket = getSocket() || connectSocket();
     socket.emit('game:create', {}, (ack: GameAck) => {
-      setBusy(false);
+      setBusy(null);
       if (ack?.error) setError(ack.error);
       else if (ack?.game) navigate(`/game/${ack.game.code}`);
     });
@@ -32,14 +34,15 @@ export function LobbyPage() {
 
   function joinGame(e: FormEvent) {
     e.preventDefault();
-    setBusy(true);
+    if (busy) return;
+    setBusy('join');
     setError('');
     const socket = getSocket() || connectSocket();
     socket.emit(
       'game:join',
       { code: joinCode.trim().toUpperCase() },
       (ack: GameAck) => {
-        setBusy(false);
+        setBusy(null);
         if (ack?.error) setError(ack.error);
         else if (ack?.game) navigate(`/game/${ack.game.code}`);
       },
@@ -75,8 +78,8 @@ export function LobbyPage() {
         <form className="action-block" onSubmit={createGame}>
           <h2>Create game</h2>
           <p className="muted">Game type: Between · 2–6 players</p>
-          <button className="btn primary" disabled={busy} type="submit">
-            Create room
+          <button className="btn primary" disabled={Boolean(busy)} type="submit">
+            {busy === 'create' ? <Loader label="" size="sm" /> : 'Create room'}
           </button>
         </form>
 
@@ -91,10 +94,15 @@ export function LobbyPage() {
               placeholder="ABC123"
               maxLength={6}
               required
+              disabled={Boolean(busy)}
             />
           </label>
-          <button className="btn secondary" disabled={busy} type="submit">
-            Join room
+          <button
+            className="btn secondary"
+            disabled={Boolean(busy)}
+            type="submit"
+          >
+            {busy === 'join' ? <Loader label="" size="sm" /> : 'Join room'}
           </button>
         </form>
       </div>
