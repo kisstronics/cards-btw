@@ -68,6 +68,9 @@ export function LoginPage() {
         {theme === 'light' ? '☾' : '☀'}
       </button>
       <div className="login-panel app-main">
+        <Link to="/" className="ghost-link login-back">
+          Back to home
+        </Link>
         <p className="brand">Between</p>
         <h1>Card table nights, online</h1>
         <p className="lede">
