@@ -7,9 +7,25 @@ import { ContactPage } from './pages/ContactPage';
 import { GameInfoPage } from './pages/GameInfoPage';
 import { GamePage } from './pages/GamePage';
 import { GamesPage } from './pages/GamesPage';
+import { HomePage } from './pages/HomePage';
 import { LobbyPage } from './pages/LobbyPage';
 import { LoginPage } from './pages/LoginPage';
 import { PrivacyPage } from './pages/PrivacyPage';
+
+function RootGate() {
+  const { user, loading } = useAuth();
+  if (loading) {
+    return (
+      <div className="mobile-shell">
+        <div className="app-main center">
+          <Loader label="Loading…" size="lg" />
+        </div>
+      </div>
+    );
+  }
+  if (!user) return <HomePage />;
+  return <LobbyPage />;
+}
 
 function Protected({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();
@@ -22,24 +38,17 @@ function Protected({ children }: { children: React.ReactNode }) {
       </div>
     );
   }
-  if (!user) return <Navigate to="/login" replace />;
+  if (!user) return <Navigate to="/" replace />;
   return children;
 }
 
 export default function App() {
   return (
     <Routes>
+      <Route path="/" element={<RootGate />} />
       <Route path="/login" element={<LoginPage />} />
       <Route path="/oauth/callback" element={<AuthCallbackPage />} />
       <Route path="/auth/callback" element={<AuthCallbackPage />} />
-      <Route
-        path="/"
-        element={
-          <Protected>
-            <LobbyPage />
-          </Protected>
-        }
-      />
       <Route
         path="/games"
         element={
